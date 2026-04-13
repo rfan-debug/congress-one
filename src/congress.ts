@@ -32,17 +32,22 @@ async function getJson<T>(url: string, apiKey: string): Promise<T> {
  *
  * The list endpoint uses `fromDateTime`/`toDateTime` on *updateDate*, not
  * introducedDate, so we over-fetch a little and filter client-side.
+ *
+ * Per-type failures are collected into `listErrors` rather than thrown, so one
+ * flaky chamber doesn't poison the whole run — but the caller can (and should)
+ * surface them so a totally-broken key doesn't silently look like "no bills".
  */
 export async function listRecentBills(
     apiKey: string,
     minDate: string,
     limit: number,
-): Promise<CongressListBill[]> {
+): Promise<{ bills: CongressListBill[]; listErrors: Array<{ type: string; error: string }> }> {
     // Round-robin the bill types so we don't bias toward HR.
     const perType = Math.max(5, Math.ceil(limit / BILL_TYPES.length));
     const fromDateTime = `${minDate}T00:00:00Z`;
 
     const results: CongressListBill[] = [];
+    const listErrors: Array<{ type: string; error: string }> = [];
     for (const type of BILL_TYPES) {
         const url = `${API_ROOT}/bill/119/${type}?limit=${perType}&fromDateTime=${fromDateTime}&sort=updateDate+desc`;
         try {
@@ -53,14 +58,15 @@ export async function listRecentBills(
                 }
             }
         } catch (err) {
-            // One failing chamber should not poison the whole ingest run.
-            console.warn(`listRecentBills: failed for type=${type}: ${(err as Error).message}`);
+            const message = (err as Error).message;
+            console.warn(`listRecentBills: failed for type=${type}: ${message}`);
+            listErrors.push({ type, error: message });
         }
     }
 
     // Sort newest-introduced first and cap at `limit`.
     results.sort((a, b) => (b.introducedDate ?? "").localeCompare(a.introducedDate ?? ""));
-    return results.slice(0, limit);
+    return { bills: results.slice(0, limit), listErrors };
 }
 
 /** Fetch the full detail record for a single bill. */

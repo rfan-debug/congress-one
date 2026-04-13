@@ -18,6 +18,8 @@ export interface IngestResult {
     inserted: number;
     skipped: number;
     errors: Array<{ billId: string; error: string }>;
+    /** Errors from the Congress list endpoint (one per bill type that failed). */
+    listErrors: Array<{ type: string; error: string }>;
 }
 
 export async function runIngest(env: Env): Promise<IngestResult> {
@@ -30,9 +32,32 @@ export async function runIngest(env: Env): Promise<IngestResult> {
         inserted: 0,
         skipped: 0,
         errors: [],
+        listErrors: [],
     };
 
-    const recent = await listRecentBills(env.CONGRESS_API_KEY, minDate, limit);
+    // Fail fast on a missing Congress key — the silent swallow behavior below
+    // would otherwise make this look like "no new bills today".
+    if (!env.CONGRESS_API_KEY) {
+        result.listErrors.push({
+            type: "*",
+            error: "CONGRESS_API_KEY is not set. Add it to .dev.vars (local) or as a wrangler secret (remote).",
+        });
+        return result;
+    }
+    if (!env.GEMINI_API_KEY) {
+        result.listErrors.push({
+            type: "*",
+            error: "GEMINI_API_KEY is not set. Add it to .dev.vars (local) or as a wrangler secret (remote).",
+        });
+        return result;
+    }
+
+    const { bills: recent, listErrors } = await listRecentBills(
+        env.CONGRESS_API_KEY,
+        minDate,
+        limit,
+    );
+    result.listErrors = listErrors;
     result.scanned = recent.length;
 
     for (const listItem of recent) {
