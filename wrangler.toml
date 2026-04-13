@@ -17,10 +17,7 @@ crons = ["0 6 * * SUN"]
 [[d1_databases]]
 binding = "DB"
 database_name = "congress_one"
-database_id = "00000000-0000-0000-0000-000000000000"
-#binding = "DB"
-#database_name = "congress_one"
-#database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "76edadb8-4a16-49d3-93fa-73754062175e"
 
 # Non-secret configuration.
 [vars]
