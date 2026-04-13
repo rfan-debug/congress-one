@@ -5,6 +5,7 @@
 //   GET  /api/bills          JSON feed
 //   GET  /api/bills/:id      Single bill JSON
 //   POST /admin/ingest       Manually kick off an ingest (Authorization: Bearer $ADMIN_TOKEN)
+//   GET  /admin/diag         Upstream-API diagnostic (same auth)
 //
 // Scheduled:
 //   weekly cron -> runIngest()
@@ -31,6 +32,9 @@ export default {
             }
             if (request.method === "POST" && url.pathname === "/admin/ingest") {
                 return await handleAdminIngest(request, env, ctx);
+            }
+            if (request.method === "GET" && url.pathname === "/admin/diag") {
+                return await handleAdminDiag(request, env);
             }
             if (request.method === "GET" && url.pathname === "/healthz") {
                 return new Response("ok", { status: 200 });
@@ -115,9 +119,7 @@ async function handleAdminIngest(
     env: Env,
     ctx: ExecutionContext,
 ): Promise<Response> {
-    const auth = request.headers.get("authorization") ?? "";
-    const expected = `Bearer ${env.ADMIN_TOKEN}`;
-    if (!env.ADMIN_TOKEN || auth !== expected) {
+    if (!isAdmin(request, env)) {
         return new Response("unauthorized", { status: 401 });
     }
 
@@ -127,6 +129,107 @@ async function handleAdminIngest(
     ctx.waitUntil(resultPromise);
     const result = await resultPromise;
     return json(result);
+}
+
+/**
+ * Diagnostic: hit both upstream APIs with the minimum possible payload and
+ * return the raw status / first chunk of body for each. Useful when
+ * `/admin/ingest` returns all zeros and we need to know whether the problem is
+ * in the Worker's code, the Congress key, the Gemini key, or the network.
+ *
+ * We deliberately do NOT touch D1 or the ingest pipeline.
+ */
+async function handleAdminDiag(request: Request, env: Env): Promise<Response> {
+    if (!isAdmin(request, env)) {
+        return new Response("unauthorized", { status: 401 });
+    }
+
+    const report: Record<string, unknown> = {
+        env: {
+            MIN_BILL_DATE: env.MIN_BILL_DATE ?? null,
+            INGEST_LIMIT: env.INGEST_LIMIT ?? null,
+            GEMINI_MODEL: env.GEMINI_MODEL ?? null,
+            CONGRESS_API_KEY_present: Boolean(env.CONGRESS_API_KEY),
+            CONGRESS_API_KEY_length: env.CONGRESS_API_KEY?.length ?? 0,
+            GEMINI_API_KEY_present: Boolean(env.GEMINI_API_KEY),
+            GEMINI_API_KEY_length: env.GEMINI_API_KEY?.length ?? 0,
+            ADMIN_TOKEN_present: Boolean(env.ADMIN_TOKEN),
+        },
+    };
+
+    // --- Congress API probe ------------------------------------------------
+    if (env.CONGRESS_API_KEY) {
+        const probeUrl = new URL("https://api.congress.gov/v3/bill/119/hr");
+        probeUrl.searchParams.set("api_key", env.CONGRESS_API_KEY);
+        probeUrl.searchParams.set("format", "json");
+        probeUrl.searchParams.set("limit", "2");
+        probeUrl.searchParams.set("sort", "updateDate desc");
+        try {
+            const res = await fetch(probeUrl.toString(), {
+                headers: { "User-Agent": "congress-one/0.1 (diagnostic)" },
+            });
+            const text = await res.text();
+            let parsedBills: number | null = null;
+            let parsedKeys: string[] | null = null;
+            try {
+                const j = JSON.parse(text);
+                parsedKeys = Object.keys(j);
+                if (Array.isArray(j.bills)) parsedBills = j.bills.length;
+            } catch {
+                /* leave null */
+            }
+            report.congress = {
+                // Strip the api_key from what we report back so the log is safe.
+                url: probeUrl.toString().replace(/api_key=[^&]*/, "api_key=REDACTED"),
+                status: res.status,
+                ok: res.ok,
+                bodyPreview: text.slice(0, 400),
+                parsedTopLevelKeys: parsedKeys,
+                parsedBillsCount: parsedBills,
+            };
+        } catch (err) {
+            report.congress = { error: (err as Error).message };
+        }
+    } else {
+        report.congress = { error: "CONGRESS_API_KEY is empty" };
+    }
+
+    // --- Gemini API probe --------------------------------------------------
+    if (env.GEMINI_API_KEY) {
+        const model = env.GEMINI_MODEL || "gemini-2.5-flash";
+        const url =
+            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent` +
+            `?key=${encodeURIComponent(env.GEMINI_API_KEY)}`;
+        try {
+            const res = await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    contents: [{ role: "user", parts: [{ text: "Reply with the single word: pong" }] }],
+                    generationConfig: { temperature: 0, maxOutputTokens: 8 },
+                }),
+            });
+            const text = await res.text();
+            report.gemini = {
+                model,
+                status: res.status,
+                ok: res.ok,
+                bodyPreview: text.slice(0, 400),
+            };
+        } catch (err) {
+            report.gemini = { error: (err as Error).message };
+        }
+    } else {
+        report.gemini = { error: "GEMINI_API_KEY is empty" };
+    }
+
+    return json(report);
+}
+
+function isAdmin(request: Request, env: Env): boolean {
+    const auth = request.headers.get("authorization") ?? "";
+    const expected = `Bearer ${env.ADMIN_TOKEN}`;
+    return Boolean(env.ADMIN_TOKEN) && auth === expected;
 }
 
 function json(data: unknown, status = 200): Response {

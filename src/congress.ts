@@ -43,19 +43,45 @@ export async function listRecentBills(
     limit: number,
 ): Promise<{ bills: CongressListBill[]; listErrors: Array<{ type: string; error: string }> }> {
     // Round-robin the bill types so we don't bias toward HR.
-    const perType = Math.max(5, Math.ceil(limit / BILL_TYPES.length));
-    const fromDateTime = `${minDate}T00:00:00Z`;
+    // We deliberately over-fetch per type because the API sorts by updateDate
+    // and we filter by introducedDate client-side.
+    const perType = Math.max(10, Math.ceil(limit / BILL_TYPES.length) * 3);
 
     const results: CongressListBill[] = [];
     const listErrors: Array<{ type: string; error: string }> = [];
     for (const type of BILL_TYPES) {
-        const url = `${API_ROOT}/bill/119/${type}?limit=${perType}&fromDateTime=${fromDateTime}&sort=updateDate+desc`;
+        // NOTE: intentionally NOT passing fromDateTime — api.congress.gov
+        // requires fromDateTime and toDateTime to be provided *together*, and
+        // some endpoints silently return empty arrays when only one is set.
+        // We rely on `sort=updateDate desc` to put recent bills first and
+        // filter by introducedDate client-side.
+        const url = `${API_ROOT}/bill/119/${type}?limit=${perType}&sort=updateDate+desc`;
         try {
-            const page = await getJson<{ bills: CongressListBill[] }>(url, apiKey);
-            for (const b of page.bills ?? []) {
+            const page = await getJson<{ bills?: CongressListBill[] }>(url, apiKey);
+            const bills = page.bills;
+            if (!Array.isArray(bills)) {
+                listErrors.push({
+                    type,
+                    error: `response had no 'bills' array; top-level keys=${Object.keys(page).join(",") || "(none)"}`,
+                });
+                continue;
+            }
+            if (bills.length === 0) {
+                listErrors.push({ type, error: "API returned 0 bills (empty array)" });
+                continue;
+            }
+            let kept = 0;
+            for (const b of bills) {
                 if (b.introducedDate && b.introducedDate >= minDate) {
                     results.push(b);
+                    kept += 1;
                 }
+            }
+            if (kept === 0) {
+                listErrors.push({
+                    type,
+                    error: `API returned ${bills.length} bills but none had introducedDate >= ${minDate}. Oldest returned: ${bills[bills.length - 1]?.introducedDate ?? "(unknown)"}, newest: ${bills[0]?.introducedDate ?? "(unknown)"}`,
+                });
             }
         } catch (err) {
             const message = (err as Error).message;
