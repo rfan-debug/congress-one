@@ -17,17 +17,21 @@ crons = ["0 6 * * SUN"]
 [[d1_databases]]
 binding = "DB"
 database_name = "congress_one"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "00000000-0000-0000-0000-000000000000"
+#binding = "DB"
+#database_name = "congress_one"
+#database_id = "REPLACE_WITH_D1_DATABASE_ID"
 
 # Non-secret configuration.
 [vars]
 # Only ingest bills introduced on/after this date (YYYY-MM-DD).
 MIN_BILL_DATE = "2025-01-01"
 # How many bills to fetch per cron run (Congress API max page size is 250).
-INGEST_LIMIT = "50"
+# INGEST_LIMIT = "50"
+INGEST_LIMIT = "1"
 # Which Google Gemini model to use for summarization.
 # Free tier available: gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-flash.
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 
 # Secrets (set via `wrangler secret put <NAME>` or the CI pipeline):
 #   CONGRESS_API_KEY - https://api.congress.gov/sign-up/

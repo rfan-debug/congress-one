@@ -94,7 +94,7 @@ export async function runIngest(env: Env): Promise<IngestResult> {
             const sponsor = detail.sponsors?.[0]?.fullName ?? null;
             const billLabel = `${formatType(detail.type)} ${detail.number} (${detail.congress}th Congress)`;
 
-            const model = env.GEMINI_MODEL || "gemini-2.5-flash";
+            const model = env.GEMINI_MODEL || "gemini-3.1-flash-preview";
             const bilingual = await summarizeBill(
                 env.GEMINI_API_KEY,
                 model,
