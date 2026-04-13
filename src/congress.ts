@@ -132,7 +132,7 @@ export function billKey(congress: number, type: string, number: number): string 
     return `${congress}-${type.toLowerCase()}-${number}`;
 }
 
-/** Strip HTML tags from the CRS summary so we can feed plain text to Claude. */
+/** Strip HTML tags from the CRS summary so we can feed plain text to Gemini. */
 export function stripHtml(html: string): string {
     return html
         .replace(/<style[\s\S]*?<\/style>/gi, " ")

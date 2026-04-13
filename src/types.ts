@@ -6,11 +6,11 @@ export interface Env {
     // vars (non-secret)
     MIN_BILL_DATE: string;
     INGEST_LIMIT: string;
-    CLAUDE_MODEL: string;
+    GEMINI_MODEL: string;
 
     // secrets
     CONGRESS_API_KEY: string;
-    ANTHROPIC_API_KEY: string;
+    GEMINI_API_KEY: string;
     ADMIN_TOKEN: string;
 }
 
@@ -69,7 +69,7 @@ export interface CongressBillSummary {
     versionCode?: string;
 }
 
-/** Output of the Claude summarization call. */
+/** Output of the Gemini summarization call. */
 export interface BilingualSummary {
     english: string;
     chinese: string;

@@ -1,7 +1,6 @@
 // Pipeline that turns recent Congress bills into cached bilingual summaries.
 // Called from both the weekly cron trigger and the /admin/ingest HTTP route.
 
-import { summarizeBill } from "./claude";
 import {
     billKey,
     getBillDetail,
@@ -9,6 +8,7 @@ import {
     listRecentBills,
     stripHtml,
 } from "./congress";
+import { summarizeBill } from "./gemini";
 import { hasBill, insertBill } from "./db";
 import type { Env } from "./types";
 
@@ -44,7 +44,7 @@ export async function runIngest(env: Env): Promise<IngestResult> {
                 continue;
             }
 
-            // Fetch the full detail + summary so Claude has useful context.
+            // Fetch the full detail + summary so Gemini has useful context.
             const detail = await getBillDetail(
                 env.CONGRESS_API_KEY,
                 listItem.congress,
@@ -70,9 +70,10 @@ export async function runIngest(env: Env): Promise<IngestResult> {
             const sponsor = detail.sponsors?.[0]?.fullName ?? null;
             const billLabel = `${formatType(detail.type)} ${detail.number} (${detail.congress}th Congress)`;
 
+            const model = env.GEMINI_MODEL || "gemini-2.5-flash";
             const bilingual = await summarizeBill(
-                env.ANTHROPIC_API_KEY,
-                env.CLAUDE_MODEL || "claude-haiku-4-5-20251001",
+                env.GEMINI_API_KEY,
+                model,
                 {
                     title: detail.title,
                     billLabel,
@@ -97,7 +98,7 @@ export async function runIngest(env: Env): Promise<IngestResult> {
                 summary_en: bilingual.english,
                 summary_zh: bilingual.chinese,
                 summarized_at: new Date().toISOString(),
-                model: env.CLAUDE_MODEL || "claude-haiku-4-5-20251001",
+                model,
             });
 
             result.inserted += 1;

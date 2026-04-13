@@ -6,8 +6,9 @@ average reader can understand what a bill actually means in under a minute.
 - **Source** — [api.congress.gov](https://api.congress.gov/) (Library of
   Congress; see also <https://www.loc.gov/apis/json-and-yaml/>). Only bills
   introduced on/after **2025-01-01** are ingested.
-- **Summarizer** — Anthropic Claude. Each bill is summarized **once** and
-  cached in Cloudflare **D1** (SQLite). No per-request LLM calls.
+- **Summarizer** — Google Gemini via
+  [Google AI Studio](https://aistudio.google.com/). Each bill is summarized
+  **once** and cached in Cloudflare **D1** (SQLite). No per-request LLM calls.
 - **Listing** — sortable by introduced date or latest action; searchable by
   title; per-card English ↔ 中文 toggle.
 - **Refresh** — a Cloudflare Workers **cron trigger** runs weekly (Sundays at
@@ -24,9 +25,9 @@ average reader can understand what a bill actually means in under a minute.
 .
 ├── src/
 │   ├── index.ts       # Worker entry (fetch + scheduled)
-│   ├── ingest.ts      # pipeline: Congress API -> Claude -> D1
+│   ├── ingest.ts      # pipeline: Congress API -> Gemini -> D1
 │   ├── congress.ts    # api.congress.gov client
-│   ├── claude.ts      # Anthropic Messages API client
+│   ├── gemini.ts      # Google Gemini (generativelanguage) client
 │   ├── db.ts          # D1 helpers
 │   ├── templates.ts   # server-rendered HTML
 │   └── types.ts
@@ -47,13 +48,13 @@ average reader can understand what a bill actually means in under a minute.
 | `CLOUDFLARE_ACCOUNT_ID`     | Cloudflare dashboard → right sidebar of any Workers page.    | Tells `wrangler` which account to target.        |
 | `CLOUDFLARE_D1_DATABASE_ID` | From `wrangler d1 create congress_one` (see below).          | Binds the Worker to your D1 instance.            |
 | `CONGRESS_API_KEY`          | <https://api.congress.gov/sign-up/> (free, instant).         | Query bills from api.congress.gov.               |
-| `ANTHROPIC_API_KEY`         | <https://console.anthropic.com/> → API Keys.                 | Generate the bilingual summaries.                |
+| `GEMINI_API_KEY`            | <https://aistudio.google.com/> → "Get API key" (free, instant; just a Google account). | Generate the bilingual summaries.                |
 | `ADMIN_TOKEN`               | Any random string you make up (`openssl rand -hex 32`).      | Gates the `/admin/ingest` route.                 |
 
 All six go into **GitHub → Settings → Secrets and variables → Actions → New
 repository secret** with those exact names. The workflow in
 `.github/workflows/deploy.yml` reads them and pushes the three runtime secrets
-(`CONGRESS_API_KEY`, `ANTHROPIC_API_KEY`, `ADMIN_TOKEN`) into the Worker via
+(`CONGRESS_API_KEY`, `GEMINI_API_KEY`, `ADMIN_TOKEN`) into the Worker via
 `wrangler secret put`.
 
 ---
@@ -105,7 +106,7 @@ Push to `main` — that's it. The workflow:
 1. Type-checks TypeScript (`tsc --noEmit`).
 2. Injects the D1 database id into `wrangler.toml`.
 3. Applies `schema.sql` to the remote D1 database (idempotent — safe to re-run).
-4. Pushes `CONGRESS_API_KEY`, `ANTHROPIC_API_KEY`, `ADMIN_TOKEN` into the
+4. Pushes `CONGRESS_API_KEY`, `GEMINI_API_KEY`, `ADMIN_TOKEN` into the
    Worker via `wrangler secret put`.
 5. Runs `wrangler deploy`, which publishes the Worker **and** registers the
    weekly cron trigger declared in `wrangler.toml`.
@@ -122,7 +123,7 @@ npx wrangler login
 npx wrangler d1 create congress_one          # paste database_id into wrangler.toml
 npx wrangler d1 execute congress_one --remote --file=./schema.sql
 npx wrangler secret put CONGRESS_API_KEY     # paste value when prompted
-npx wrangler secret put ANTHROPIC_API_KEY
+npx wrangler secret put GEMINI_API_KEY
 npx wrangler secret put ADMIN_TOKEN
 
 # Every deploy
@@ -158,7 +159,7 @@ Response:
 ```
 
 `INGEST_LIMIT` in `wrangler.toml` caps how many bills each run will pull
-(default: 50). Increase it for backfills, but watch your Claude spend.
+(default: 50). Increase it for backfills, but watch your Gemini quota.
 
 ---
 
@@ -169,13 +170,14 @@ Response:
    `fromDateTime=2025-01-01` and filters on `introducedDate` client-side.
 2. **De-duplicate.** For each list item we form a deterministic key
    `"<congress>-<type>-<number>"` and check D1. If it's already cached, we skip
-   it — Claude is **never** called twice for the same bill.
+   it — Gemini is **never** called twice for the same bill.
 3. **Fetch detail + CRS summary.** We pull `/bill/.../` and `/bill/.../summaries`
-   so Claude has title, sponsor, latest action, and (if available) the official
+   so Gemini has title, sponsor, latest action, and (if available) the official
    dense summary.
-4. **Summarize.** One Anthropic Messages call per bill, asking for ≤220 words
-   in plain English and ≤220 words in 简体中文 inside `<english>`/`<chinese>`
-   tags. The system prompt enforces a neutral, non-partisan tone.
+4. **Summarize.** One Gemini `generateContent` call per bill, asking for ≤220
+   words in plain English and ≤220 words in 简体中文 inside
+   `<english>`/`<chinese>` tags. A `systemInstruction` enforces a neutral,
+   non-partisan tone.
 5. **Cache.** The row goes into `bills` in D1 with both summaries and metadata.
 6. **Serve.** `GET /` renders cached rows; `GET /api/bills` exposes JSON. No
    LLM calls at request time.
@@ -205,9 +207,9 @@ All live in `wrangler.toml` under `[vars]` (non-secret) or as secrets:
 | ----------------- | ---------------------------- | ------------------------------------------------------ |
 | `MIN_BILL_DATE`   | `2025-01-01`                 | Only bills introduced on/after this date are ingested. |
 | `INGEST_LIMIT`    | `50`                         | Max bills examined per ingest run.                     |
-| `CLAUDE_MODEL`    | `claude-haiku-4-5-20251001`  | Anthropic model id used for summarization.             |
+| `GEMINI_MODEL`    | `gemini-2.5-flash`           | Google Gemini model id used for summarization.         |
 | `CONGRESS_API_KEY`  | _secret_                   | api.congress.gov key                                   |
-| `ANTHROPIC_API_KEY` | _secret_                   | Anthropic console key                                  |
+| `GEMINI_API_KEY`    | _secret_                   | Google AI Studio key                                   |
 | `ADMIN_TOKEN`       | _secret_                   | Gates `/admin/ingest`                                  |
 
 The cron schedule lives in `[triggers] crons = ["0 6 * * 0"]`. Edit that line
@@ -225,7 +227,7 @@ npx wrangler d1 execute congress_one --local --file=./schema.sql
 
 # Dev secrets: create a .dev.vars file (gitignored) with:
 #   CONGRESS_API_KEY=...
-#   ANTHROPIC_API_KEY=...
+#   GEMINI_API_KEY=...
 #   ADMIN_TOKEN=dev-token
 
 # Run the Worker locally (http://localhost:8787)
@@ -252,9 +254,12 @@ curl "http://localhost:8787/__scheduled?cron=0+6+*+*+0"
   the capacity of a small civic site.
 - **api.congress.gov.** Free, but rate-limited (~5,000 req/hr per key). The
   weekly cron uses at most ~10 × INGEST_LIMIT requests.
-- **Anthropic.** Pay per token. With `claude-haiku-4-5` and ~1k tokens out per
-  bill, a weekly run of 50 bills is single-digit cents. Bump `CLAUDE_MODEL` to
-  Sonnet if you want higher-quality summaries.
+- **Google Gemini (AI Studio).** Has a free tier with generous per-minute and
+  per-day quotas on the Flash models — a weekly run of 50 bills against
+  `gemini-2.5-flash` easily fits inside the free allowance. If you outgrow it,
+  AI Studio will prompt you to enable billing on the same key. Bump
+  `GEMINI_MODEL` to `gemini-2.5-pro` if you want higher-quality summaries
+  (slower, smaller free quota).
 
 ---
 
