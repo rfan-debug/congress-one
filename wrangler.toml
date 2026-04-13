@@ -1,0 +1,31 @@
+name = "congress-one"
+main = "src/index.ts"
+compatibility_date = "2025-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+# Weekly cron trigger: every Sunday at 06:00 UTC.
+# Cloudflare's free plan includes cron triggers.
+[triggers]
+crons = ["0 6 * * 0"]
+
+# D1 database binding. Create the database with:
+#   wrangler d1 create congress_one
+# then paste the returned database_id below (or via `wrangler secret`/CI).
+[[d1_databases]]
+binding = "DB"
+database_name = "congress_one"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+# Non-secret configuration.
+[vars]
+# Only ingest bills introduced on/after this date (YYYY-MM-DD).
+MIN_BILL_DATE = "2025-01-01"
+# How many bills to fetch per cron run (Congress API max page size is 250).
+INGEST_LIMIT = "50"
+# Which Claude model to use for summarization.
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"
+
+# Secrets (set via `wrangler secret put <NAME>` or the CI pipeline):
+#   CONGRESS_API_KEY - https://api.congress.gov/sign-up/
+#   ANTHROPIC_API_KEY - https://console.anthropic.com/
+#   ADMIN_TOKEN      - random string, used to protect /admin/* routes

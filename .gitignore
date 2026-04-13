@@ -205,3 +205,10 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Node / TypeScript / Wrangler
+node_modules/
+dist/
+.wrangler/
+*.tsbuildinfo
+.dev.vars

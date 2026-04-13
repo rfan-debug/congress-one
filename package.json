@@ -1,0 +1,21 @@
+{
+  "name": "congress-one",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plain-English & Chinese summaries of U.S. Congress bills, deployed to Cloudflare Workers.",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "db:init:local": "wrangler d1 execute congress_one --local --file=./schema.sql",
+    "db:init:remote": "wrangler d1 execute congress_one --remote --file=./schema.sql",
+    "ingest:local": "wrangler dev --test-scheduled",
+    "ingest:remote": "curl -X POST \"$WORKER_URL/admin/ingest\" -H \"Authorization: Bearer $ADMIN_TOKEN\""
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250410.0",
+    "typescript": "^5.4.5",
+    "wrangler": "^3.90.0"
+  }
+}
