@@ -54,7 +54,6 @@ export async function runIngest(env: Env): Promise<IngestResult> {
 
     const { bills: recent, listErrors } = await listRecentBills(
         env.CONGRESS_API_KEY,
-        minDate,
         limit,
     );
     result.listErrors = listErrors;
@@ -113,7 +112,7 @@ export async function runIngest(env: Env): Promise<IngestResult> {
                 bill_id: id,
                 congress: detail.congress,
                 bill_type: detail.type.toLowerCase(),
-                bill_number: detail.number,
+                bill_number: Number(detail.number),
                 title: detail.title,
                 sponsor,
                 introduced_date: detail.introducedDate,

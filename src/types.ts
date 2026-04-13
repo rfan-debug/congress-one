@@ -32,23 +32,27 @@ export interface BillRow {
     model: string;
 }
 
-/** Minimal bill shape returned by the Congress list endpoint. */
+/**
+ * Minimal bill shape returned by the Congress **list** endpoint.
+ * Note: `number` is a string in the JSON payload (e.g. "6507"), and the list
+ * endpoint does NOT include `introducedDate` — that only exists on the detail
+ * response. Filter by introduced date at the detail stage, not here.
+ */
 export interface CongressListBill {
     congress: number;
     type: string;           // e.g. "HR", "S", "HJRES"
-    number: number;
+    number: string;
     title: string;
-    introducedDate?: string;
     updateDate?: string;
     latestAction?: { actionDate?: string; text?: string };
     url: string;            // API URL for the bill detail
 }
 
-/** Bill detail (the interesting bits we actually use). */
+/** Bill detail. `number` is also a string in the JSON payload. */
 export interface CongressBillDetail {
     congress: number;
     type: string;
-    number: number;
+    number: string;
     title: string;
     introducedDate?: string;
     sponsors?: Array<{ fullName?: string; firstName?: string; lastName?: string }>;
