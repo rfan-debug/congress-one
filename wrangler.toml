@@ -5,8 +5,11 @@ compatibility_flags = ["nodejs_compat"]
 
 # Weekly cron trigger: every Sunday at 06:00 UTC.
 # Cloudflare's free plan includes cron triggers.
+# NOTE: use "SUN" (or "7") in the day-of-week field — Cloudflare's cron
+# validator has been seen to reject a bare "0" there even though POSIX
+# cron allows it. See Cloudflare docs: Workers → Cron Triggers.
 [triggers]
-crons = ["0 6 * * 0"]
+crons = ["0 6 * * SUN"]
 
 # D1 database binding. Create the database with:
 #   wrangler d1 create congress_one
