@@ -1,0 +1,143 @@
+name: Deploy to Cloudflare Workers
+
+# Triggers:
+#   - pull_request to main  -> run the "validate" job only (typecheck). No
+#                              secrets used, no deploy. Catches TS errors
+#                              before a PR gets merged.
+#   - push to main          -> run "validate" then "deploy". This is the path
+#                              a PR merge takes: merging into main creates a
+#                              push event on main.
+#   - workflow_dispatch     -> manual run from the Actions tab; deploys only
+#                              when dispatched from the main branch.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   CLOUDFLARE_API_TOKEN       scoped to "Edit Cloudflare Workers" + D1
+#   CLOUDFLARE_ACCOUNT_ID      your Cloudflare account id
+#   CLOUDFLARE_D1_DATABASE_ID  id of the D1 database you created
+#   CONGRESS_API_KEY           from https://api.congress.gov/sign-up/
+#   GEMINI_API_KEY             from https://aistudio.google.com/ -> "Get API key"
+#   ADMIN_TOKEN                any random string; protects /admin/* routes
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # PR validations: group per head branch so two commits to the same PR
+  # cancel the in-flight validation. Main deploys: single "main" group, never
+  # cancelled in progress so two fast merges deploy in order.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    name: Type-check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Type-check TypeScript
+        run: npx tsc --noEmit
+
+  deploy:
+    name: Deploy to Cloudflare
+    # Deploy only runs on pushes to main (which includes PR merges) and on
+    # manual workflow_dispatch runs from main. Pull-request events skip this
+    # job entirely — they only validate.
+    needs: validate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Inject D1 database id into wrangler.toml
+        run: |
+          python3 - <<'PY'
+          import os, re, pathlib
+          p = pathlib.Path("wrangler.toml")
+          text = p.read_text()
+          db_id = os.environ["CLOUDFLARE_D1_DATABASE_ID"]
+          text = re.sub(
+              r'database_id\s*=\s*"[^"]*"',
+              f'database_id = "{db_id}"',
+              text,
+          )
+          p.write_text(text)
+          print("wrangler.toml database_id updated")
+          PY
+        env:
+          CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
+
+      - name: Apply D1 schema (idempotent)
+        run: npx wrangler d1 execute congress_one --remote --file=./schema.sql
+
+      - name: Push secrets
+        run: |
+          printf '%s' "$CONGRESS_API_KEY" | npx wrangler secret put CONGRESS_API_KEY
+          printf '%s' "$GEMINI_API_KEY" | npx wrangler secret put GEMINI_API_KEY
+          printf '%s' "$ADMIN_TOKEN" | npx wrangler secret put ADMIN_TOKEN
+        env:
+          CONGRESS_API_KEY: ${{ secrets.CONGRESS_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+
+      - name: Deploy Worker
+        id: deploy
+        run: |
+          set -o pipefail
+          npx wrangler deploy 2>&1 | tee deploy.log
+          # Extract the first *.workers.dev URL wrangler printed, if any.
+          WORKER_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -n1 || true)
+          echo "worker_url=${WORKER_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Write deploy summary
+        if: always()
+        env:
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          WORKER_URL: ${{ steps.deploy.outputs.worker_url }}
+          COMMIT_SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          TRIGGER: ${{ github.event_name }}
+        run: |
+          {
+            if [ "$DEPLOY_OUTCOME" = "success" ]; then
+              echo "## Deploy succeeded"
+              echo ""
+              if [ -n "$WORKER_URL" ]; then
+                echo "**Worker URL:** $WORKER_URL"
+                echo ""
+              fi
+            else
+              echo "## Deploy failed"
+              echo ""
+            fi
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Commit | \`$COMMIT_SHA\` |"
+            echo "| Trigger | \`$TRIGGER\` |"
+            echo "| Actor | @$ACTOR |"
+          } >> "$GITHUB_STEP_SUMMARY"

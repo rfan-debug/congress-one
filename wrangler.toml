@@ -1,0 +1,36 @@
+name = "congress-one"
+main = "src/index.ts"
+compatibility_date = "2025-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+# Weekly cron trigger: every Sunday at 06:00 UTC.
+# Cloudflare's free plan includes cron triggers.
+# NOTE: use "SUN" (or "7") in the day-of-week field — Cloudflare's cron
+# validator has been seen to reject a bare "0" there even though POSIX
+# cron allows it. See Cloudflare docs: Workers → Cron Triggers.
+[triggers]
+crons = ["0 6 * * SUN"]
+
+# D1 database binding. Create the database with:
+#   wrangler d1 create congress_one
+# then paste the returned database_id below (or via `wrangler secret`/CI).
+[[d1_databases]]
+binding = "DB"
+database_name = "congress_one"
+database_id = "76edadb8-4a16-49d3-93fa-73754062175e"
+
+# Non-secret configuration.
+[vars]
+# Only ingest bills introduced on/after this date (YYYY-MM-DD).
+MIN_BILL_DATE = "2025-01-01"
+# How many bills to fetch per cron run (Congress API max page size is 250).
+# INGEST_LIMIT = "50"
+INGEST_LIMIT = "50"
+# Which Google Gemini model to use for summarization.
+# Free tier available: gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-flash.
+GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
+
+# Secrets (set via `wrangler secret put <NAME>` or the CI pipeline):
+#   CONGRESS_API_KEY - https://api.congress.gov/sign-up/
+#   GEMINI_API_KEY   - https://aistudio.google.com/ -> "Get API key"
+#   ADMIN_TOKEN      - random string, used to protect /admin/* routes
