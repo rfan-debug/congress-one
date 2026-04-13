@@ -1,10 +1,14 @@
 name: Deploy to Cloudflare Workers
 
-# Pipeline stages:
-#   1. Type-check TypeScript
-#   2. Apply D1 schema (idempotent)
-#   3. Push non-secret vars & all secrets via `wrangler secret put`
-#   4. `wrangler deploy` the Worker (which also registers the weekly cron)
+# Triggers:
+#   - pull_request to main  -> run the "validate" job only (typecheck). No
+#                              secrets used, no deploy. Catches TS errors
+#                              before a PR gets merged.
+#   - push to main          -> run "validate" then "deploy". This is the path
+#                              a PR merge takes: merging into main creates a
+#                              push event on main.
+#   - workflow_dispatch     -> manual run from the Actions tab; deploys only
+#                              when dispatched from the main branch.
 #
 # Required repository secrets (Settings → Secrets and variables → Actions):
 #   CLOUDFLARE_API_TOKEN       scoped to "Edit Cloudflare Workers" + D1
@@ -15,16 +19,45 @@ name: Deploy to Cloudflare Workers
 #   ADMIN_TOKEN                any random string; protects /admin/* routes
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
 
 concurrency:
-  group: deploy-worker
-  cancel-in-progress: false
+  # PR validations: group per head branch so two commits to the same PR
+  # cancel the in-flight validation. Main deploys: single "main" group, never
+  # cancelled in progress so two fast merges deploy in order.
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  validate:
+    name: Type-check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Type-check TypeScript
+        run: npx tsc --noEmit
+
   deploy:
+    name: Deploy to Cloudflare
+    # Deploy only runs on pushes to main (which includes PR merges) and on
+    # manual workflow_dispatch runs from main. Pull-request events skip this
+    # job entirely — they only validate.
+    needs: validate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -40,9 +73,6 @@ jobs:
           cache: "npm"
 
       - run: npm ci
-
-      - name: Type-check
-        run: npx tsc --noEmit
 
       - name: Inject D1 database id into wrangler.toml
         run: |
@@ -76,4 +106,38 @@ jobs:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
 
       - name: Deploy Worker
-        run: npx wrangler deploy
+        id: deploy
+        run: |
+          set -o pipefail
+          npx wrangler deploy 2>&1 | tee deploy.log
+          # Extract the first *.workers.dev URL wrangler printed, if any.
+          WORKER_URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.workers\.dev' deploy.log | head -n1 || true)
+          echo "worker_url=${WORKER_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Write deploy summary
+        if: always()
+        env:
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          WORKER_URL: ${{ steps.deploy.outputs.worker_url }}
+          COMMIT_SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          TRIGGER: ${{ github.event_name }}
+        run: |
+          {
+            if [ "$DEPLOY_OUTCOME" = "success" ]; then
+              echo "## Deploy succeeded"
+              echo ""
+              if [ -n "$WORKER_URL" ]; then
+                echo "**Worker URL:** $WORKER_URL"
+                echo ""
+              fi
+            else
+              echo "## Deploy failed"
+              echo ""
+            fi
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Commit | \`$COMMIT_SHA\` |"
+            echo "| Trigger | \`$TRIGGER\` |"
+            echo "| Actor | @$ACTOR |"
+          } >> "$GITHUB_STEP_SUMMARY"
