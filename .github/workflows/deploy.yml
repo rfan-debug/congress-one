@@ -13,10 +13,14 @@ name: Deploy to Cloudflare Workers
 # Required repository secrets (Settings → Secrets and variables → Actions):
 #   CLOUDFLARE_API_TOKEN       scoped to "Edit Cloudflare Workers" + D1
 #   CLOUDFLARE_ACCOUNT_ID      your Cloudflare account id
-#   CLOUDFLARE_D1_DATABASE_ID  id of the D1 database you created
 #   CONGRESS_API_KEY           from https://api.congress.gov/sign-up/
 #   GEMINI_API_KEY             from https://aistudio.google.com/ -> "Get API key"
 #   ADMIN_TOKEN                any random string; protects /admin/* routes
+#
+# Optional secret:
+#   CLOUDFLARE_D1_DATABASE_ID  overrides the database_id committed in
+#                              wrangler.toml. Leave unset to use the
+#                              value already in the file.
 
 on:
   pull_request:
@@ -75,19 +79,45 @@ jobs:
       - run: npm ci
 
       - name: Inject D1 database id into wrangler.toml
+        # Override the committed database_id with the secret, if set. If the
+        # secret is unset/empty we MUST NOT overwrite — otherwise the next
+        # step fails with "Found a database with name or binding
+        # congress_one but it is missing a database_id". Database IDs aren't
+        # actually secret (they're visible in the Cloudflare dashboard), so
+        # it's fine to keep the real one committed in wrangler.toml and
+        # treat this step as a no-op override.
         run: |
           python3 - <<'PY'
-          import os, re, pathlib
+          import os, re, pathlib, sys
           p = pathlib.Path("wrangler.toml")
           text = p.read_text()
-          db_id = os.environ["CLOUDFLARE_D1_DATABASE_ID"]
+          db_id = os.environ.get("CLOUDFLARE_D1_DATABASE_ID", "").strip()
+          if not db_id:
+              print(
+                  "CLOUDFLARE_D1_DATABASE_ID is unset or empty; "
+                  "using database_id already committed in wrangler.toml"
+              )
+              # Sanity check: the committed file must have a non-empty id,
+              # otherwise the next step will fail and the error will be
+              # harder to diagnose than this message.
+              m = re.search(r'database_id\s*=\s*"([^"]*)"', text)
+              if not m or not m.group(1):
+                  print(
+                      "ERROR: wrangler.toml has no committed database_id and "
+                      "no CLOUDFLARE_D1_DATABASE_ID secret was provided. "
+                      "Set the secret or commit the id to wrangler.toml.",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+              print(f"committed database_id = {m.group(1)}")
+              sys.exit(0)
           text = re.sub(
               r'database_id\s*=\s*"[^"]*"',
               f'database_id = "{db_id}"',
               text,
           )
           p.write_text(text)
-          print("wrangler.toml database_id updated")
+          print("wrangler.toml database_id updated from secret")
           PY
         env:
           CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
