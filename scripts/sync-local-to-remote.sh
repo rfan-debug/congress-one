@@ -56,12 +56,17 @@ for arg in "$@"; do
   esac
 done
 
-# --- Preflight: sqlite3 CLI must be installed -------------------------------
-if ! command -v sqlite3 >/dev/null 2>&1; then
-  echo "ERROR: 'sqlite3' CLI not found on PATH." >&2
+# --- Preflight: python3 must be installed ---------------------------------
+# We use python3's built-in sqlite3 module (not the `sqlite3` CLI) because
+# the CLI's `.mode insert` emits `unistr('\xNNNN')` escape sequences for
+# non-ASCII characters starting in SQLite 3.45, and D1's SQLite build
+# doesn't ship the `unistr()` function. Python's sqlite3 driver lets us
+# emit plain single-quoted string literals that work everywhere.
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "ERROR: 'python3' not found on PATH." >&2
   echo "       Install it first:" >&2
-  echo "         macOS:  brew install sqlite   (or use /usr/bin/sqlite3)" >&2
-  echo "         Ubuntu: sudo apt-get install sqlite3" >&2
+  echo "         macOS:  comes preinstalled; otherwise 'brew install python'" >&2
+  echo "         Ubuntu: sudo apt-get install python3" >&2
   exit 1
 fi
 
@@ -75,11 +80,9 @@ else
 fi
 
 # --- 2/4 Find the local SQLite file and dump the `bills` table --------------
-echo "--- 2/4 Locating wrangler local D1 SQLite file"
-# Wrangler 3/4 stores local D1s under:
-#   .wrangler/state/v3/d1/miniflare-D1DatabaseObject/<hash>.sqlite
-# There can be multiple files (one per bound DB, or stale files from old
-# runs). We pick the one that actually has a `bills` table with rows.
+# We do discovery + dump in one Python pass (using the stdlib sqlite3
+# module) so we emit plain single-quoted string literals for every column
+# — no `unistr('\xNNNN')` escapes, which D1's SQLite build can't execute.
 STATE_DIR=".wrangler/state/v3/d1"
 if [[ ! -d "$STATE_DIR" ]]; then
   echo "ERROR: $STATE_DIR does not exist." >&2
@@ -87,72 +90,113 @@ if [[ ! -d "$STATE_DIR" ]]; then
   exit 1
 fi
 
-LOCAL_SQLITE=""
-BEST_COUNT=0
-while IFS= read -r -d '' candidate; do
-  # Check if this file has a `bills` table at all. If sqlite3 errors
-  # (e.g. the file is empty / locked), just skip it.
-  count=$(sqlite3 "$candidate" \
-    "SELECT COUNT(*) FROM bills;" 2>/dev/null || echo "")
-  if [[ -z "$count" ]]; then
-    continue
-  fi
-  echo "    candidate: $candidate (rows=$count)"
-  if (( count > BEST_COUNT )); then
-    BEST_COUNT=$count
-    LOCAL_SQLITE=$candidate
-  fi
-done < <(find "$STATE_DIR" -type f -name '*.sqlite' -print0)
+echo "--- 2/4 Locating local D1 SQLite file and dumping 'bills'"
+STATE_DIR="$STATE_DIR" DUMP_FILE="$DUMP_FILE" DB_TABLE="bills" \
+python3 - <<'PY'
+import os
+import pathlib
+import sqlite3
+import sys
 
-if [[ -z "$LOCAL_SQLITE" ]]; then
-  echo "ERROR: no local D1 sqlite file contained a readable 'bills' table." >&2
-  echo "       Expected to find one under $STATE_DIR." >&2
-  echo "       Try: npm run dev (stop it once it boots), then re-run." >&2
-  exit 1
-fi
+state_dir = pathlib.Path(os.environ["STATE_DIR"])
+dump_file = pathlib.Path(os.environ["DUMP_FILE"])
+table = os.environ["DB_TABLE"]
 
-if (( BEST_COUNT == 0 )); then
-  echo "ERROR: found $LOCAL_SQLITE but it has 0 rows in 'bills'." >&2
-  echo "       Populate your local cache first:" >&2
-  echo "         npm run dev   # in another terminal" >&2
-  echo "         curl -X POST http://localhost:8787/admin/ingest \\" >&2
-  echo "           -H \"Authorization: Bearer \$ADMIN_TOKEN\"" >&2
-  exit 1
-fi
 
-echo "    using: $LOCAL_SQLITE ($BEST_COUNT rows)"
-echo "--- 2/4 Dumping 'bills' -> $DUMP_FILE"
-# .mode insert emits `INSERT INTO "bills" VALUES(...);` for every row.
-# NOTE: do NOT wrap the dump in BEGIN/COMMIT. D1's remote execute rejects
-# raw SQL transaction statements with:
-#   "To execute a transaction, please use the state.storage.transaction()
-#    or state.storage.transactionSync() APIs instead of the SQL BEGIN
-#    TRANSACTION or SAVEPOINT statements."
-# D1 already wraps the whole --file batch in its own transaction.
-sqlite3 "$LOCAL_SQLITE" > "$DUMP_FILE" <<SQL
-.mode insert bills
-SELECT * FROM bills;
-SQL
+def sqlite_lit(v):
+    """Render a Python value as a SQLite literal.
+
+    Uses only `NULL`, bare numbers, `x'...'` blobs, and single-quoted
+    strings with doubled quotes. No `unistr()`, no `char()` — so the
+    output works on any SQLite build, including D1's.
+    """
+    if v is None:
+        return "NULL"
+    if isinstance(v, bool):  # must precede int-check: bool is a subclass of int
+        return "1" if v else "0"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        # repr() preserves full precision; SQLite accepts scientific notation.
+        return repr(v)
+    if isinstance(v, (bytes, bytearray)):
+        return "x'" + bytes(v).hex() + "'"
+    # Text. SQLite allows literal newlines and other control chars inside
+    # '...' strings; only NUL is disallowed, so strip it defensively.
+    s = str(v).replace("\x00", "")
+    return "'" + s.replace("'", "''") + "'"
+
+
+# Find candidate .sqlite files and pick the one with the most rows.
+best_path = None
+best_count = 0
+for candidate in state_dir.rglob("*.sqlite"):
+    if not candidate.is_file():
+        continue
+    try:
+        with sqlite3.connect(f"file:{candidate}?mode=ro", uri=True) as conn:
+            cur = conn.execute(f"SELECT COUNT(*) FROM {table}")
+            (count,) = cur.fetchone()
+    except sqlite3.Error:
+        continue
+    print(f"    candidate: {candidate} (rows={count})")
+    if count > best_count:
+        best_count = count
+        best_path = candidate
+
+if best_path is None:
+    print(
+        f"ERROR: no local D1 sqlite file contained a readable '{table}' table.\n"
+        f"       Expected to find one under {state_dir}.\n"
+        f"       Try: npm run dev (stop it once it boots), then re-run.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+if best_count == 0:
+    print(
+        f"ERROR: found {best_path} but it has 0 rows in '{table}'.\n"
+        f"       Populate your local cache first:\n"
+        f"         npm run dev   # in another terminal\n"
+        f"         curl -X POST http://localhost:8787/admin/ingest \\\n"
+        f"           -H \"Authorization: Bearer $ADMIN_TOKEN\"",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+print(f"    using: {best_path} ({best_count} rows)")
+print(f"    dumping -> {dump_file}")
+
+with sqlite3.connect(f"file:{best_path}?mode=ro", uri=True) as conn:
+    # Use TEXT for blobs-that-are-really-utf8 etc. Default works here because
+    # every column in `bills` is declared TEXT/INTEGER in schema.sql.
+    cur = conn.execute(f'SELECT * FROM "{table}"')
+    cols = [d[0] for d in cur.description]
+    col_list = ",".join(f'"{c}"' for c in cols)
+    written = 0
+    with dump_file.open("w", encoding="utf-8") as f:
+        for row in cur:
+            vals = ",".join(sqlite_lit(v) for v in row)
+            f.write(
+                f'INSERT OR REPLACE INTO "{table}" ({col_list}) VALUES ({vals});\n'
+            )
+            written += 1
+
+print(f"    wrote {written} INSERT OR REPLACE statements")
+PY
 
 if [[ ! -s "$DUMP_FILE" ]]; then
-  echo "ERROR: dump is empty. This should not happen — $LOCAL_SQLITE had" >&2
-  echo "       $BEST_COUNT rows a moment ago. Check $DUMP_FILE manually." >&2
+  echo "ERROR: dump is empty — check $DUMP_FILE manually." >&2
   exit 1
 fi
 
-# --- 3/4 Rewrite INSERTs for idempotent upsert -----------------------------
-echo "--- 3/4 Rewriting INSERTs to INSERT OR REPLACE"
-# Plain literal substitution — no word boundary anchors, since BSD sed (macOS)
-# doesn't support `\b` in ERE. The `.mode insert` output always starts each
-# row with exactly `INSERT INTO "bills"`, so a literal swap is safe.
-sed -i.bak 's/INSERT INTO /INSERT OR REPLACE INTO /g' "$DUMP_FILE"
-rm -f "$DUMP_FILE.bak"
-
+# --- 3/4 Sanity-check the dump ---------------------------------------------
+echo "--- 3/4 Verifying dump"
 row_count=$(grep -c '^INSERT OR REPLACE INTO' "$DUMP_FILE" || true)
 echo "    $row_count INSERT statements ready to apply"
 
 if [[ "$row_count" -eq 0 ]]; then
-  echo "ERROR: no INSERT statements found after rewrite. Check $DUMP_FILE" >&2
+  echo "ERROR: no INSERT statements found in $DUMP_FILE" >&2
   exit 1
 fi
 
