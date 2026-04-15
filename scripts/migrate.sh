@@ -41,6 +41,16 @@ for col_def in "${NEW_COLUMNS[@]}"; do
 
   if echo "$output" | grep -q "duplicate column name"; then
     echo "    already present, skipping"
+  elif echo "$output" | grep -q "no such table: bills"; then
+    echo "    ERROR: the 'bills' table does not exist in this database."
+    echo
+    echo "    Run the schema first, then re-run this script:"
+    if [[ "$TARGET" == "--local" ]]; then
+      echo "      npm run db:init:local   # or: npm run db:migrate:local (does both)"
+    else
+      echo "      npm run db:init:remote  # or: npm run db:migrate:remote (does both)"
+    fi
+    exit 1
   elif echo "$output" | grep -qiE "error|✘"; then
     echo "    ERROR adding column '$col_name':"
     echo "$output"
