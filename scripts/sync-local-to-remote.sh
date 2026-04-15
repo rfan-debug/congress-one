@@ -10,7 +10,10 @@
 #
 # Pipeline:
 #   1. Migrate the remote DB so its schema matches local (idempotent).
-#   2. `wrangler d1 export --local` the bills table to a SQL dump.
+#   2. Find wrangler's local D1 SQLite file and dump the `bills` table
+#      directly with the `sqlite3` CLI (`.mode insert`). We deliberately
+#      avoid `wrangler d1 export --local` — that path has been flaky
+#      across wrangler versions and has silently produced empty dumps.
 #   3. Rewrite every `INSERT INTO` to `INSERT OR REPLACE INTO` so re-runs
 #      upsert instead of erroring on bill_id conflicts, and remote-only
 #      rows (if any) are preserved.
@@ -25,10 +28,15 @@
 #   - You have a local D1 populated via `npm run dev` + /admin/ingest.
 #   - `wrangler` is authenticated (`npx wrangler login`) so it can hit the
 #     remote D1 REST API.
+#   - The `sqlite3` CLI is installed:
+#       macOS:  brew install sqlite    (or use the system one at /usr/bin/sqlite3)
+#       Ubuntu: sudo apt-get install sqlite3
 set -euo pipefail
 
 DB_NAME="congress_one"
-DUMP_FILE="${TMPDIR:-/tmp}/congress-one-sync.sql"
+# Hardcode /tmp so the path is predictable across macOS (where $TMPDIR is
+# something like /var/folders/…/T/) and Linux.
+DUMP_FILE="/tmp/congress-one-sync.sql"
 DRY_RUN=0
 SKIP_MIGRATE=0
 
@@ -48,6 +56,15 @@ for arg in "$@"; do
   esac
 done
 
+# --- Preflight: sqlite3 CLI must be installed -------------------------------
+if ! command -v sqlite3 >/dev/null 2>&1; then
+  echo "ERROR: 'sqlite3' CLI not found on PATH." >&2
+  echo "       Install it first:" >&2
+  echo "         macOS:  brew install sqlite   (or use /usr/bin/sqlite3)" >&2
+  echo "         Ubuntu: sudo apt-get install sqlite3" >&2
+  exit 1
+fi
+
 # --- 1/4 Remote schema migration -------------------------------------------
 if [[ "$SKIP_MIGRATE" -eq 0 ]]; then
   echo "--- 1/4 Migrating remote D1 schema (idempotent)"
@@ -57,24 +74,77 @@ else
   echo "--- 1/4 Skipping remote schema migration (--skip-migrate)"
 fi
 
-# --- 2/4 Dump local data ---------------------------------------------------
-echo "--- 2/4 Dumping local D1 '$DB_NAME' (data only) -> $DUMP_FILE"
-# --no-schema keeps CREATE TABLE statements out of the dump; the remote
-# table already exists (step 1) and we don't want to clobber it.
-npx wrangler d1 export "$DB_NAME" --local --no-schema --output="$DUMP_FILE"
+# --- 2/4 Find the local SQLite file and dump the `bills` table --------------
+echo "--- 2/4 Locating wrangler local D1 SQLite file"
+# Wrangler 3/4 stores local D1s under:
+#   .wrangler/state/v3/d1/miniflare-D1DatabaseObject/<hash>.sqlite
+# There can be multiple files (one per bound DB, or stale files from old
+# runs). We pick the one that actually has a `bills` table with rows.
+STATE_DIR=".wrangler/state/v3/d1"
+if [[ ! -d "$STATE_DIR" ]]; then
+  echo "ERROR: $STATE_DIR does not exist." >&2
+  echo "       Have you run 'npm run dev' at least once?" >&2
+  exit 1
+fi
+
+LOCAL_SQLITE=""
+BEST_COUNT=0
+while IFS= read -r -d '' candidate; do
+  # Check if this file has a `bills` table at all. If sqlite3 errors
+  # (e.g. the file is empty / locked), just skip it.
+  count=$(sqlite3 "$candidate" \
+    "SELECT COUNT(*) FROM bills;" 2>/dev/null || echo "")
+  if [[ -z "$count" ]]; then
+    continue
+  fi
+  echo "    candidate: $candidate (rows=$count)"
+  if (( count > BEST_COUNT )); then
+    BEST_COUNT=$count
+    LOCAL_SQLITE=$candidate
+  fi
+done < <(find "$STATE_DIR" -type f -name '*.sqlite' -print0)
+
+if [[ -z "$LOCAL_SQLITE" ]]; then
+  echo "ERROR: no local D1 sqlite file contained a readable 'bills' table." >&2
+  echo "       Expected to find one under $STATE_DIR." >&2
+  echo "       Try: npm run dev (stop it once it boots), then re-run." >&2
+  exit 1
+fi
+
+if (( BEST_COUNT == 0 )); then
+  echo "ERROR: found $LOCAL_SQLITE but it has 0 rows in 'bills'." >&2
+  echo "       Populate your local cache first:" >&2
+  echo "         npm run dev   # in another terminal" >&2
+  echo "         curl -X POST http://localhost:8787/admin/ingest \\" >&2
+  echo "           -H \"Authorization: Bearer \$ADMIN_TOKEN\"" >&2
+  exit 1
+fi
+
+echo "    using: $LOCAL_SQLITE ($BEST_COUNT rows)"
+echo "--- 2/4 Dumping 'bills' -> $DUMP_FILE"
+# .mode insert emits `INSERT INTO "bills" VALUES(...);` for every row.
+# Wrapping in BEGIN/COMMIT keeps the remote apply as a single transaction.
+{
+  echo "BEGIN TRANSACTION;"
+  sqlite3 "$LOCAL_SQLITE" <<SQL
+.mode insert bills
+SELECT * FROM bills;
+SQL
+  echo "COMMIT;"
+} > "$DUMP_FILE"
 
 if [[ ! -s "$DUMP_FILE" ]]; then
-  echo "ERROR: dump is empty. Does your local D1 have any rows?" >&2
-  echo "       Run 'npm run dev' and hit /admin/ingest first." >&2
+  echo "ERROR: dump is empty. This should not happen — $LOCAL_SQLITE had" >&2
+  echo "       $BEST_COUNT rows a moment ago. Check $DUMP_FILE manually." >&2
   exit 1
 fi
 
 # --- 3/4 Rewrite INSERTs for idempotent upsert -----------------------------
 echo "--- 3/4 Rewriting INSERTs to INSERT OR REPLACE"
-# Match INSERT INTO at start-of-statement (allowing leading whitespace and
-# an optional BEGIN TRANSACTION prefix that some export tools emit). We use
-# sed -i.bak for portability between GNU (Linux) and BSD (macOS) sed.
-sed -i.bak -E 's/\bINSERT INTO\b/INSERT OR REPLACE INTO/g' "$DUMP_FILE"
+# Plain literal substitution — no word boundary anchors, since BSD sed (macOS)
+# doesn't support `\b` in ERE. The `.mode insert` output always starts each
+# row with exactly `INSERT INTO "bills"`, so a literal swap is safe.
+sed -i.bak 's/INSERT INTO /INSERT OR REPLACE INTO /g' "$DUMP_FILE"
 rm -f "$DUMP_FILE.bak"
 
 row_count=$(grep -c '^INSERT OR REPLACE INTO' "$DUMP_FILE" || true)
