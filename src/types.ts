@@ -14,7 +14,15 @@ export interface Env {
     ADMIN_TOKEN: string;
 }
 
-/** A cached, already-summarized bill as it lives in D1. */
+/**
+ * Direction of a citizen-facing impact. The UI maps `"increase"` to green
+ * and `"decrease"` to red; `"none"` (and `null` for legacy rows) hides the
+ * badge. Values are literal strings so they stringify cleanly into D1 and
+ * out via the JSON API.
+ */
+export type ImpactDirection = "increase" | "decrease" | "none";
+
+/** A cached, already-summarized bill as it lives in D1, after parsing. */
 export interface BillRow {
     bill_id: string;
     congress: number;
@@ -28,6 +36,19 @@ export interface BillRow {
     source_url: string;
     summary_en: string;
     summary_zh: string;
+    /**
+     * Citizen-impact alerts. `null` for rows cached before these columns
+     * existed; the UI treats `null` the same as `"none"` and hides the badge.
+     */
+    rights_impact: ImpactDirection | null;
+    tax_impact: ImpactDirection | null;
+    benefits_impact: ImpactDirection | null;
+    /**
+     * Content tags — lowercase short strings like `"farm"`, `"tax change"`,
+     * `"healthcare"`. Empty array for rows cached before tagging was added.
+     * Stored in D1 as a JSON-encoded string; `src/db.ts` parses on read.
+     */
+    tags: string[];
     summarized_at: string;
     model: string;
 }
@@ -73,8 +94,15 @@ export interface CongressBillSummary {
     versionCode?: string;
 }
 
-/** Output of the Gemini summarization call. */
-export interface BilingualSummary {
+/**
+ * Everything Gemini returns per bill in a single call: the two summaries,
+ * the three citizen-impact directions, and a handful of content tags.
+ */
+export interface BillEnrichment {
     english: string;
     chinese: string;
+    rightsImpact: ImpactDirection;
+    taxImpact: ImpactDirection;
+    benefitsImpact: ImpactDirection;
+    tags: string[];
 }

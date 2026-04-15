@@ -4,6 +4,10 @@
 --
 -- `bill_id` is a deterministic key of the form "<congress>-<type>-<number>",
 -- e.g. "119-hr-1234".
+--
+-- NOTE: this file is used for FRESH databases. For existing databases with
+-- rows already populated, the `migrations/` directory contains idempotent
+-- ALTER TABLE statements; the deploy workflow runs them after this file.
 CREATE TABLE IF NOT EXISTS bills (
     bill_id             TEXT PRIMARY KEY,
     congress            INTEGER NOT NULL,
@@ -18,6 +22,18 @@ CREATE TABLE IF NOT EXISTS bills (
     -- Cached LLM output.
     summary_en          TEXT NOT NULL,
     summary_zh          TEXT NOT NULL,
+    -- Citizen-impact alerts. Each is one of "increase" | "decrease" | "none"
+    -- (nullable on rows that were cached before these columns were added).
+    -- "increase" and "decrease" describe the direction of change the bill
+    -- would cause; the UI colors increase green and decrease red. These are
+    -- neutral *directions*, not opinions — a tax increase is green because
+    -- it's an increase, not because it's good.
+    rights_impact       TEXT,
+    tax_impact          TEXT,
+    benefits_impact     TEXT,
+    -- JSON array of lowercase content tags, e.g. '["farm","tax change"]'.
+    -- NULL on rows cached before tagging was introduced.
+    tags                TEXT,
     -- Bookkeeping.
     summarized_at       TEXT NOT NULL,
     model               TEXT NOT NULL
