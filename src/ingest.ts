@@ -95,7 +95,7 @@ export async function runIngest(env: Env): Promise<IngestResult> {
             const billLabel = `${formatType(detail.type)} ${detail.number} (${detail.congress}th Congress)`;
 
             const model = env.GEMINI_MODEL || "gemini-3.1-flash-preview";
-            const bilingual = await summarizeBill(
+            const enrichment = await summarizeBill(
                 env.GEMINI_API_KEY,
                 model,
                 {
@@ -119,8 +119,12 @@ export async function runIngest(env: Env): Promise<IngestResult> {
                 latest_action_date: detail.latestAction?.actionDate ?? null,
                 latest_action_text: detail.latestAction?.text ?? null,
                 source_url: detail.publicUrl ?? "",
-                summary_en: bilingual.english,
-                summary_zh: bilingual.chinese,
+                summary_en: enrichment.english,
+                summary_zh: enrichment.chinese,
+                rights_impact: enrichment.rightsImpact,
+                tax_impact: enrichment.taxImpact,
+                benefits_impact: enrichment.benefitsImpact,
+                tags: enrichment.tags,
                 summarized_at: new Date().toISOString(),
                 model,
             });

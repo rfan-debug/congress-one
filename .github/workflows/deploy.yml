@@ -95,6 +95,13 @@ jobs:
       - name: Apply D1 schema (idempotent)
         run: npx wrangler d1 execute congress_one --remote --file=./schema.sql
 
+      - name: Apply D1 column migrations (idempotent)
+        # Adds new columns to existing databases without failing if they
+        # already exist. See scripts/migrate.sh for the details — this is
+        # how we extend the `bills` table with new impact/tag columns
+        # without dropping data.
+        run: ./scripts/migrate.sh --remote
+
       - name: Push secrets
         run: |
           printf '%s' "$CONGRESS_API_KEY" | npx wrangler secret put CONGRESS_API_KEY

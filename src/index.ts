@@ -1,16 +1,17 @@
 // Worker entry point.
 //
 // Routes:
-//   GET  /                   HTML page with cached, sortable bills
-//   GET  /api/bills          JSON feed
+//   GET  /                   HTML page with cached, sortable, tag-filterable bills
+//   GET  /api/bills          JSON feed (supports ?q, ?sort, ?order, ?tag, ?limit, ?offset)
 //   GET  /api/bills/:id      Single bill JSON
+//   GET  /api/tags           All distinct content tags currently cached
 //   POST /admin/ingest       Manually kick off an ingest (Authorization: Bearer $ADMIN_TOKEN)
 //   GET  /admin/diag         Upstream-API diagnostic (same auth)
 //
 // Scheduled:
 //   weekly cron -> runIngest()
 
-import { countBills, getBill, listBills } from "./db";
+import { countBills, getBill, listAllTags, listBills } from "./db";
 import { runIngest } from "./ingest";
 import { renderIndex } from "./templates";
 import type { Env } from "./types";
@@ -29,6 +30,9 @@ export default {
             if (request.method === "GET" && url.pathname.startsWith("/api/bills/")) {
                 const id = decodeURIComponent(url.pathname.slice("/api/bills/".length));
                 return await handleApiDetail(id, env);
+            }
+            if (request.method === "GET" && url.pathname === "/api/tags") {
+                return await handleApiTags(env);
             }
             if (request.method === "POST" && url.pathname === "/admin/ingest") {
                 return await handleAdminIngest(request, env, ctx);
@@ -74,16 +78,18 @@ async function handleIndex(url: URL, env: Env): Promise<Response> {
     const sortParam = url.searchParams.get("sort");
     const orderParam = url.searchParams.get("order");
     const q = url.searchParams.get("q") ?? "";
+    const tag = (url.searchParams.get("tag") ?? "").trim().toLowerCase();
     const sortBy =
         sortParam === "latest_action_date" ? "latest_action_date" : "introduced_date";
     const order = orderParam === "asc" ? "asc" : "desc";
 
-    const [bills, total] = await Promise.all([
-        listBills(env.DB, { sortBy, order, limit: 50, q }),
+    const [bills, total, allTags] = await Promise.all([
+        listBills(env.DB, { sortBy, order, limit: 50, q, tag }),
         countBills(env.DB),
+        listAllTags(env.DB),
     ]);
 
-    const html = renderIndex({ bills, sortBy, order, q, total });
+    const html = renderIndex({ bills, sortBy, order, q, tag, allTags, total });
     return new Response(html, {
         headers: {
             "content-type": "text/html; charset=utf-8",
@@ -97,6 +103,7 @@ async function handleApiList(url: URL, env: Env): Promise<Response> {
     const sortParam = url.searchParams.get("sort");
     const orderParam = url.searchParams.get("order");
     const q = url.searchParams.get("q") ?? "";
+    const tag = (url.searchParams.get("tag") ?? "").trim().toLowerCase();
     const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10);
     const offset = Number.parseInt(url.searchParams.get("offset") ?? "0", 10);
 
@@ -104,8 +111,13 @@ async function handleApiList(url: URL, env: Env): Promise<Response> {
         sortParam === "latest_action_date" ? "latest_action_date" : "introduced_date";
     const order = orderParam === "asc" ? "asc" : "desc";
 
-    const bills = await listBills(env.DB, { sortBy, order, limit, offset, q });
+    const bills = await listBills(env.DB, { sortBy, order, limit, offset, q, tag });
     return json({ count: bills.length, bills });
+}
+
+async function handleApiTags(env: Env): Promise<Response> {
+    const tags = await listAllTags(env.DB);
+    return json({ count: tags.length, tags });
 }
 
 async function handleApiDetail(id: string, env: Env): Promise<Response> {
