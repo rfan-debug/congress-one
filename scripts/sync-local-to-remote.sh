@@ -123,15 +123,16 @@ fi
 echo "    using: $LOCAL_SQLITE ($BEST_COUNT rows)"
 echo "--- 2/4 Dumping 'bills' -> $DUMP_FILE"
 # .mode insert emits `INSERT INTO "bills" VALUES(...);` for every row.
-# Wrapping in BEGIN/COMMIT keeps the remote apply as a single transaction.
-{
-  echo "BEGIN TRANSACTION;"
-  sqlite3 "$LOCAL_SQLITE" <<SQL
+# NOTE: do NOT wrap the dump in BEGIN/COMMIT. D1's remote execute rejects
+# raw SQL transaction statements with:
+#   "To execute a transaction, please use the state.storage.transaction()
+#    or state.storage.transactionSync() APIs instead of the SQL BEGIN
+#    TRANSACTION or SAVEPOINT statements."
+# D1 already wraps the whole --file batch in its own transaction.
+sqlite3 "$LOCAL_SQLITE" > "$DUMP_FILE" <<SQL
 .mode insert bills
 SELECT * FROM bills;
 SQL
-  echo "COMMIT;"
-} > "$DUMP_FILE"
 
 if [[ ! -s "$DUMP_FILE" ]]; then
   echo "ERROR: dump is empty. This should not happen — $LOCAL_SQLITE had" >&2
