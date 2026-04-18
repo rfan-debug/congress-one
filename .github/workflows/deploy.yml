@@ -133,10 +133,30 @@ jobs:
         run: ./scripts/migrate.sh --remote
 
       - name: Push secrets
+        # For each secret, push it to Cloudflare ONLY if the GitHub secret
+        # is non-empty. A missing GitHub repository secret evaluates to the
+        # empty string in `${{ secrets.X }}`, and piping that into
+        # `wrangler secret put` silently wipes the existing Cloudflare-side
+        # secret — which later surfaces as cryptic 403 / "unregistered
+        # caller" errors from Gemini, 401s from the Congress API, or
+        # locked-out /admin/* routes. Skipping instead of wiping is the
+        # forgiving default: if you've already set the secret directly on
+        # Cloudflare (via `wrangler secret put` locally), CI won't touch it
+        # until you populate the corresponding GitHub secret.
         run: |
-          printf '%s' "$CONGRESS_API_KEY" | npx wrangler secret put CONGRESS_API_KEY
-          printf '%s' "$GEMINI_API_KEY" | npx wrangler secret put GEMINI_API_KEY
-          printf '%s' "$ADMIN_TOKEN" | npx wrangler secret put ADMIN_TOKEN
+          push_if_set() {
+            local name="$1"
+            local value="$2"
+            if [ -z "$value" ]; then
+              echo "::warning::GitHub secret $name is unset or empty; preserving the existing Cloudflare-side value (if any). Set the repository secret to rotate, or run 'wrangler secret put $name' locally."
+              return 0
+            fi
+            printf '%s' "$value" | npx wrangler secret put "$name"
+            echo "pushed $name (${#value} chars)"
+          }
+          push_if_set CONGRESS_API_KEY "$CONGRESS_API_KEY"
+          push_if_set GEMINI_API_KEY   "$GEMINI_API_KEY"
+          push_if_set ADMIN_TOKEN      "$ADMIN_TOKEN"
         env:
           CONGRESS_API_KEY: ${{ secrets.CONGRESS_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
