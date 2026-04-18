@@ -128,17 +128,28 @@ async function handleFind(url: URL, env: Env): Promise<Response> {
 
     let matchedTags: string[] = [];
     let error: string | null = null;
-    try {
-        const model = env.GEMINI_MODEL || "gemini-2.5-flash";
-        matchedTags = await findTagsForProfile(
-            env.GEMINI_API_KEY,
-            model,
-            profile,
-            allTags,
-        );
-    } catch (e) {
-        error = (e as Error).message;
-        console.warn("find: gemini tag-match failed:", error);
+    if (!env.GEMINI_API_KEY) {
+        // Short-circuit: calling Gemini with an empty key returns a 403
+        // "Method doesn't allow unregistered callers", which is confusing
+        // for end users. Surface a plain operator-facing message instead.
+        error =
+            "Semantic search is unavailable: the Gemini API key is not " +
+            "configured on this Worker. Check /admin/diag (it reports " +
+            "GEMINI_API_KEY_length) or run `wrangler secret put GEMINI_API_KEY`.";
+        console.warn("find: GEMINI_API_KEY is empty on the Worker env");
+    } else {
+        try {
+            const model = env.GEMINI_MODEL || "gemini-2.5-flash";
+            matchedTags = await findTagsForProfile(
+                env.GEMINI_API_KEY,
+                model,
+                profile,
+                allTags,
+            );
+        } catch (e) {
+            error = (e as Error).message;
+            console.warn("find: gemini tag-match failed:", error);
+        }
     }
 
     const bills = matchedTags.length > 0
