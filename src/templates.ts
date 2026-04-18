@@ -337,7 +337,7 @@ function renderBillCard(b: BillRow): string {
 function renderAlerts(b: BillRow): string {
     const items: string[] = [];
     pushAlert(items, b.rights_impact, "Your rights");
-    pushAlert(items, b.tax_impact, "Your taxes");
+    pushAlert(items, b.tax_impact, "Your taxes", true);
     pushAlert(items, b.benefits_impact, "Your benefits");
     if (items.length === 0) return "";
     return `<div class="alerts">${items.join("")}</div>`;
@@ -347,17 +347,19 @@ function pushAlert(
     sink: string[],
     direction: ImpactDirection | null,
     label: string,
+    invertColor = false,
 ): void {
+    const upClass = invertColor ? "down" : "up";
+    const downClass = invertColor ? "up" : "down";
     if (direction === "increase") {
         sink.push(
-            `<span class="alert up" title="${esc(label)} goes up under this bill"><span class="arrow">↑</span> ${esc(label)}</span>`,
+            `<span class="alert ${upClass}" title="${esc(label)} goes up under this bill"><span class="arrow">↑</span> ${esc(label)}</span>`,
         );
     } else if (direction === "decrease") {
         sink.push(
-            `<span class="alert down" title="${esc(label)} goes down under this bill"><span class="arrow">↓</span> ${esc(label)}</span>`,
+            `<span class="alert ${downClass}" title="${esc(label)} goes down under this bill"><span class="arrow">↓</span> ${esc(label)}</span>`,
         );
     }
-    // "none" and null → render nothing
 }
 
 /**
