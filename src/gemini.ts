@@ -251,3 +251,88 @@ function extractTag(text: string, tag: string): string | null {
     const m = text.match(re);
     return m ? m[1].trim() : null;
 }
+
+/**
+ * Map a user's free-text profile to a subset of the tag vocabulary we
+ * already use on bills. One small Gemini call: the prompt contains only
+ * the tag list + the profile text (no bill summaries), and we ask the
+ * model to emit a JSON array of at most 8 tags. That gives the /find
+ * feature a semantic "what should I care about?" layer at a fraction of
+ * the token cost of feeding bill summaries through the model.
+ *
+ * Returns tags drawn from `tagVocabulary` (case-folded to lowercase).
+ * Anything the model hallucinates outside the vocabulary is dropped.
+ */
+export async function findTagsForProfile(
+    apiKey: string,
+    model: string,
+    profile: string,
+    tagVocabulary: string[],
+): Promise<string[]> {
+    // Defensive cap on vocabulary size so the prompt stays predictable
+    // even if the cache ever grows a huge long tail of tags.
+    const vocab = tagVocabulary.slice(0, 300);
+    if (vocab.length === 0 || !profile.trim()) return [];
+
+    const prompt = [
+        "A user shared a short profile describing who they are and what they",
+        "care about. From the list of known tags below, return the ones most",
+        "relevant to this user. Pick at most 8. Only use tags from the list —",
+        "do not invent new ones. If nothing fits, return an empty array.",
+        "Return ONLY a JSON array of lowercase strings, no prose.",
+        "",
+        "Known tags:",
+        vocab.map((t) => `- ${t}`).join("\n"),
+        "",
+        "User profile:",
+        profile.slice(0, 1000),
+    ].join("\n");
+
+    const url = `${API_ROOT}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: {
+                temperature: 0.1,
+                maxOutputTokens: 200,
+                responseMimeType: "application/json",
+            },
+        }),
+    });
+    if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Gemini tag-match ${res.status}: ${body.slice(0, 300)}`);
+    }
+    const data = (await res.json()) as GeminiResponse;
+    if (data.error) {
+        throw new Error(`Gemini error ${data.error.code}: ${data.error.message}`);
+    }
+
+    const text = (data.candidates ?? [])
+        .flatMap((c) => c.content?.parts ?? [])
+        .map((p) => p.text ?? "")
+        .join("")
+        .trim();
+    if (!text) return [];
+
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(text);
+    } catch {
+        return [];
+    }
+    if (!Array.isArray(parsed)) return [];
+
+    const known = new Set(vocab.map((t) => t.toLowerCase()));
+    const out: string[] = [];
+    for (const item of parsed) {
+        if (typeof item !== "string") continue;
+        const norm = item.trim().toLowerCase();
+        if (!norm || !known.has(norm) || out.includes(norm)) continue;
+        out.push(norm);
+        if (out.length >= 8) break;
+    }
+    return out;
+}

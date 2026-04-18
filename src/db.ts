@@ -134,6 +134,41 @@ export async function listBills(
     return (res.results ?? []).map(toBillRow);
 }
 
+/**
+ * Return bills that have any of the given tags (OR semantics across the
+ * input list). Empty input short-circuits to an empty list without
+ * hitting D1.
+ *
+ * Unlike `listBills({tag})` which filters by a single exact tag, this is
+ * used by the /find route where Gemini returns 3–8 relevant tags and we
+ * want the union.
+ */
+export async function listBillsByAnyTag(
+    db: D1Database,
+    tags: string[],
+    opts: { limit?: number } = {},
+): Promise<BillRow[]> {
+    if (tags.length === 0) return [];
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+    // Build a `LOWER(value) IN (?,?,…)` list. D1's prepare()/bind() only
+    // takes scalars, so we expand the placeholders ourselves.
+    const placeholders = tags.map(() => "?").join(",");
+    const sql = `
+        SELECT * FROM bills
+         WHERE EXISTS (
+           SELECT 1 FROM json_each(bills.tags)
+            WHERE LOWER(value) IN (${placeholders})
+         )
+         ORDER BY introduced_date DESC
+         LIMIT ?`;
+    const bindings: unknown[] = [
+        ...tags.map((t) => t.trim().toLowerCase()),
+        limit,
+    ];
+    const res = await db.prepare(sql).bind(...bindings).all<RawBillRow>();
+    return (res.results ?? []).map(toBillRow);
+}
+
 export async function getBill(db: D1Database, billId: string): Promise<BillRow | null> {
     const raw = await db
         .prepare("SELECT * FROM bills WHERE bill_id = ?")

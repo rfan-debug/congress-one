@@ -2,6 +2,7 @@
 //
 // Routes:
 //   GET  /                   HTML page with cached, sortable, tag-filterable bills
+//   GET  /find               HTML page: profile-based relevance search (?profile=...)
 //   GET  /api/bills          JSON feed (supports ?q, ?sort, ?order, ?tag, ?limit, ?offset)
 //   GET  /api/bills/:id      Single bill JSON
 //   GET  /api/tags           All distinct content tags currently cached
@@ -11,7 +12,8 @@
 // Scheduled:
 //   weekly cron -> runIngest()
 
-import { countBills, getBill, listAllTags, listBills } from "./db";
+import { countBills, getBill, listAllTags, listBills, listBillsByAnyTag } from "./db";
+import { findTagsForProfile } from "./gemini";
 import { runIngest } from "./ingest";
 import { renderIndex } from "./templates";
 import type { Env } from "./types";
@@ -23,6 +25,9 @@ export default {
         try {
             if (request.method === "GET" && url.pathname === "/") {
                 return await handleIndex(url, env);
+            }
+            if (request.method === "GET" && url.pathname === "/find") {
+                return await handleFind(url, env);
             }
             if (request.method === "GET" && url.pathname === "/api/bills") {
                 return await handleApiList(url, env);
@@ -95,6 +100,65 @@ async function handleIndex(url: URL, env: Env): Promise<Response> {
             "content-type": "text/html; charset=utf-8",
             // Short edge cache — the data only changes on cron or admin ingest.
             "cache-control": "public, max-age=300",
+        },
+    });
+}
+
+/**
+ * Profile-based bill relevance search. One Gemini call maps the free-text
+ * profile to a small set of tags already in the cache; we then filter
+ * bills by those tags in D1. Token cost: ~600 in + ~30 out per request —
+ * far cheaper than feeding bill summaries into the model.
+ *
+ * We deliberately disable edge caching: every profile is unique, and the
+ * model response is not deterministic across runs.
+ */
+async function handleFind(url: URL, env: Env): Promise<Response> {
+    const profile = (url.searchParams.get("profile") ?? "").trim();
+    if (!profile) {
+        // Empty submission — send the user back to the landing page where
+        // the find form lives.
+        return Response.redirect(new URL("/", url).toString(), 302);
+    }
+
+    const [allTags, total] = await Promise.all([
+        listAllTags(env.DB),
+        countBills(env.DB),
+    ]);
+
+    let matchedTags: string[] = [];
+    let error: string | null = null;
+    try {
+        const model = env.GEMINI_MODEL || "gemini-2.5-flash";
+        matchedTags = await findTagsForProfile(
+            env.GEMINI_API_KEY,
+            model,
+            profile,
+            allTags,
+        );
+    } catch (e) {
+        error = (e as Error).message;
+        console.warn("find: gemini tag-match failed:", error);
+    }
+
+    const bills = matchedTags.length > 0
+        ? await listBillsByAnyTag(env.DB, matchedTags, { limit: 50 })
+        : [];
+
+    const html = renderIndex({
+        bills,
+        sortBy: "introduced_date",
+        order: "desc",
+        q: "",
+        tag: "",
+        allTags,
+        total,
+        findResult: { profile, matchedTags, error },
+    });
+    return new Response(html, {
+        headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "private, no-store",
         },
     });
 }
